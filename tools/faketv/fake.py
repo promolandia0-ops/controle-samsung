@@ -1,5 +1,8 @@
 import asyncio, ssl, json, base64, time
 from aiohttp import web, WSMsgType
+import os
+N=0
+MODE=os.environ.get('MODE','')
 LOG=open('log.txt','w',buffering=1)
 def log(*a): print(time.strftime('%H:%M:%S'),*a,file=LOG)
 async def info(req):
@@ -11,6 +14,12 @@ async def app_status(req):
 async def ws(req):
     log('WS connect',req.url)
     w=web.WebSocketResponse(); await w.prepare(req)
+    global N
+    N+=1
+    if MODE=='pending':
+        await asyncio.sleep(3)
+        if N<=2:
+            await w.send_str(json.dumps({'event':'ms.channel.timeout'})); await w.close(); return w
     await asyncio.sleep(1.5)
     await w.send_str(json.dumps({"data":{"clients":[],"id":"x","token":"55667788"},"event":"ms.channel.connect"}))
     async def ime():

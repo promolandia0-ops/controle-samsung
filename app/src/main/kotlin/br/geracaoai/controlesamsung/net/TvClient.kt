@@ -55,8 +55,8 @@ object ErrorText {
         ErrorKind.NOT_FOUND -> "TV não encontrada em $ip. Confira se a TV está ligada e no mesmo Wi-Fi do celular."
         ErrorKind.REFUSED -> "A TV em $ip recusou a conexão. Ela pode estar desligada/em espera (use \"Ligar TV\") ou com o controle por rede bloqueado nas configurações da TV."
         ErrorKind.TIMEOUT -> "A TV em $ip não respondeu a tempo. Verifique o Wi-Fi e se a TV está ligada, e tente de novo."
-        ErrorKind.DENIED -> "A TV negou o acesso. Na TV, vá em Configurações > Geral > Gerenciador de dispositivos externos > Gerenciador de conexão de dispositivos e permita este celular."
-        ErrorKind.APPROVAL_TIMEOUT -> "Ninguém aceitou o pedido na TV. Olhe a tela da TV, escolha \"Permitir\" e tente conectar de novo."
+        ErrorKind.DENIED -> "A TV negou o acesso. Na TV, vá em Configurações > Geral > Gerenciador de dispositivos externos > Gerenciador de conexão de dispositivos > Lista de dispositivos: se este celular (\"Controle Samsung\") aparecer como negado, apague ou permita. Quando o pedido aparecer, escolha \"Sempre permitir\"."
+        ErrorKind.APPROVAL_TIMEOUT -> "Ninguém aceitou o pedido na TV a tempo. Aceite o pedido com o controle do app oficial SmartThings ou com o botão físico (joystick) embaixo da TV, escolha \"Sempre permitir\" (em modelos novos aparece uma lista de opções) e toque em Conectar de novo. Isso só precisa ser feito uma vez. Se o pedido não aparecer, confira a \"Lista de dispositivos\" em Configurações > Geral > Gerenciador de dispositivos externos > Gerenciador de conexão de dispositivos."
         ErrorKind.TLS -> "Falha na conexão segura com a TV em $ip. Tentei também sem criptografia. Tente de novo."
         ErrorKind.OTHER -> "Não consegui falar com a TV em $ip" + (if (detail.isNullOrBlank()) "." else ": $detail")
     }
@@ -139,10 +139,19 @@ class TvClient(private val prefs: TvStore, private val scope: CoroutineScope, pr
     private suspend fun session(ip: String) {
         var everConnected = false
         var retries = 0
+        var approvalRounds = 0
         while (scope.isActive) {
             val r = attempt(ip, reconnecting = everConnected)
             when (r) {
-                is Attempt.Fatal -> { _state.value = ConnState.Failed(ip, r.kind, r.message); return }
+                is Attempt.Fatal -> {
+                    // Pedido pendente na TV: mantém a tentativa viva em segundo plano (~90 s por tentativa) enquanto aprovam no outro controle.
+                    if (r.kind == ErrorKind.APPROVAL_TIMEOUT && !everConnected && ++approvalRounds < 3) {
+                        _state.value = ConnState.WaitingApproval(ip)
+                        delay(1500)
+                        continue
+                    }
+                    _state.value = ConnState.Failed(ip, r.kind, r.message); return
+                }
                 is Attempt.Dropped -> {
                     if (r.wasConnected) { everConnected = true; retries = 0 }
                     retries++
@@ -165,7 +174,7 @@ class TvClient(private val prefs: TvStore, private val scope: CoroutineScope, pr
     private suspend fun attempt(ip: String, reconnecting: Boolean): Attempt {
         val unreachable = ArrayList<Pair<ErrorKind, String>>()
         for (secure in listOf(true, false)) {
-            if (!reconnecting) _state.value = ConnState.Connecting(ip, if (secure) "Conectando (seguro)…" else "Tentando conexão simples…")
+            if (!reconnecting && (secure || _state.value !is ConnState.WaitingApproval)) _state.value = ConnState.Connecting(ip, if (secure) "Conectando (seguro)…" else "Tentando conexão simples…")
             val token = if (secure) prefs.token(ip) else null
             val url = SamsungProtocol.wsUrl(ip, secure, appName, token)
             val sigs = Channel<Sig>(Channel.UNLIMITED)
@@ -188,11 +197,12 @@ class TvClient(private val prefs: TvStore, private val scope: CoroutineScope, pr
                 // Socket aberto: aguardar autorização/"ms.channel.connect".
                 val hadToken = token != null
                 var waitingShown = false
-                val deadline = System.currentTimeMillis() + 45_000
+                val deadline = System.currentTimeMillis() + 90_000
                 var connected = false
+                var softFail: ErrorKind? = null
                 while (!connected) {
                     val remain = deadline - System.currentTimeMillis()
-                    if (remain <= 0) { ws.cancel(); return Attempt.Fatal(ErrorKind.APPROVAL_TIMEOUT, ErrorText.message(ErrorKind.APPROVAL_TIMEOUT, ip)) }
+                    if (remain <= 0) { ws.cancel(); softFail = ErrorKind.APPROVAL_TIMEOUT; break }
                     val slice = if (!waitingShown) (if (hadToken) 2500L else 400L) else remain
                     val sig = withTimeoutOrNull(slice.coerceAtMost(remain)) { sigs.receive() }
                     if (sig == null) {
@@ -205,8 +215,8 @@ class TvClient(private val prefs: TvStore, private val scope: CoroutineScope, pr
                                 connected = true
                                 if (!ev.token.isNullOrBlank()) prefs.setToken(ip, ev.token)
                             }
-                            TvEvent.Unauthorized -> { ws.cancel(); return Attempt.Fatal(ErrorKind.DENIED, ErrorText.message(ErrorKind.DENIED, ip)) }
-                            TvEvent.ChannelTimeout -> { ws.cancel(); return Attempt.Fatal(ErrorKind.APPROVAL_TIMEOUT, ErrorText.message(ErrorKind.APPROVAL_TIMEOUT, ip)) }
+                            TvEvent.Unauthorized -> { ws.cancel(); if (secure) prefs.setToken(ip, null); softFail = ErrorKind.DENIED; break }
+                            TvEvent.ChannelTimeout -> { ws.cancel(); softFail = ErrorKind.APPROVAL_TIMEOUT; break }
                             is TvEvent.Error -> { ws.cancel(); return Attempt.Fatal(ErrorKind.OTHER, ErrorText.message(ErrorKind.OTHER, ip, ev.message)) }
                             else -> Unit
                         }
@@ -218,6 +228,15 @@ class TvClient(private val prefs: TvStore, private val scope: CoroutineScope, pr
                         }
                         else -> Unit
                     }
+                }
+                if (!connected && softFail != null) {
+                    // Negado/expirado: na porta segura tenta ainda a 8001 sem token; na simples, desiste.
+                    if (secure) {
+                        unreachable += softFail to ErrorText.message(softFail, ip)
+                        if (!reconnecting) _state.value = ConnState.WaitingApproval(ip)
+                        continue
+                    }
+                    return Attempt.Fatal(softFail, ErrorText.message(softFail, ip))
                 }
                 if (!connected) continue
                 // Conectado.
@@ -241,6 +260,9 @@ class TvClient(private val prefs: TvStore, private val scope: CoroutineScope, pr
             } finally {
                 if (socket !== ws) { try { ws.cancel() } catch (_: Exception) {} }
             }
+        }
+        unreachable.firstOrNull { it.first == ErrorKind.DENIED || it.first == ErrorKind.APPROVAL_TIMEOUT }?.let {
+            return Attempt.Fatal(it.first, it.second)
         }
         val best = unreachable.firstOrNull { it.first == ErrorKind.REFUSED }
             ?: unreachable.firstOrNull { it.first == ErrorKind.NOT_FOUND }

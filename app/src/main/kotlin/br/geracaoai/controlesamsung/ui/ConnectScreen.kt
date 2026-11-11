@@ -127,7 +127,7 @@ fun ConnectScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
             Button(onClick = { onConnectIp(ip) }, enabled = !busy && ip.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = C.accent), modifier = Modifier.fillMaxWidth()) { Text("Conectar") }
-            Text("Na primeira conexão a TV mostra \"Permitir este dispositivo?\". Escolha Permitir — eu guardo a autorização.", color = C.textDim, fontSize = 13.sp)
+            Text("Na primeira conexão a TV mostra um pedido de acesso. Escolha \"Sempre permitir\" (em modelos novos é uma lista) — eu guardo a autorização. Se estiver negado, confira a \"Lista de dispositivos\" em Configurações > Geral > Gerenciador de dispositivos externos > Gerenciador de conexão de dispositivos.", color = C.textDim, fontSize = 13.sp)
         }
         Spacer(Modifier.height(24.dp))
     }
@@ -159,7 +159,10 @@ private fun StatusCard(state: ConnState) {
         is ConnState.WaitingApproval -> Card {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.5.dp, color = C.warn)
-                Text("Olhe a tela da TV e escolha \"Permitir\" para este celular.", color = C.text, fontSize = 15.sp)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Aguardando a TV. Aceite o pedido na tela usando o controle do app oficial SmartThings ou o botão físico (joystick) embaixo da TV, escolhendo \"Sempre permitir\" (em modelos novos aparece uma lista de opções). Só precisa fazer isso uma vez.", color = C.text, fontSize = 15.sp)
+                    Text("Eu mantenho este pedido aberto em segundo plano por cerca de 90 segundos. Dica: a TV costuma aceitar só um controle conectado por vez, então outros apps de controle (como o Controlla) podem desconectar quando este conecta. Se o pedido não aparecer, veja Configurações > Geral > Gerenciador de dispositivos externos > Gerenciador de conexão de dispositivos > Lista de dispositivos e apague ou permita \"Controle Samsung\".", color = C.textDim, fontSize = 13.sp)
+                }
             }
         }
         is ConnState.Failed -> Card {
