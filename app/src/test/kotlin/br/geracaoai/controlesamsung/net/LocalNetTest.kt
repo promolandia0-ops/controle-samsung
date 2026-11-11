@@ -35,7 +35,7 @@ class LocalNetTest {
             assertTrue(k.name + ": " + m, m.isNotBlank())
         }
         assertTrue(ErrorText.message(ErrorKind.NOT_FOUND, "192.168.0.9").contains("192.168.0.9"))
-        assertTrue(ErrorText.message(ErrorKind.APPROVAL_TIMEOUT, "1.1.1.1").contains("Permitir"))
+        assertTrue(ErrorText.message(ErrorKind.APPROVAL_TIMEOUT, "1.1.1.1").contains("Sempre permitir"))
     }
 
     @Test fun appMatchByIdThenName() {
